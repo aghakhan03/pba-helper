@@ -133,9 +133,37 @@ const uniq=xs=>[...new Set(xs)].sort((a,b)=>a.localeCompare(b));
 function el(tag,cls,txt){const x=document.createElement(tag);if(cls)x.className=cls;if(txt!==undefined)x.textContent=txt;return x}
 function notify(s){$('toast').textContent=s;$('toast').classList.remove('hidden');clearTimeout(timer);timer=setTimeout(()=>$('toast').classList.add('hidden'),2600)}
 const excelCell=v=>/[\t\r\n"]/.test(v)?'"'+v.replaceAll('"','""')+'"':v;
+// Return to the search used before copying when switching back from Excel.
+let lastLookupField='search', returnLookup=null, lookupWasAway=false;
+for(const id of ['search','bankSearch']){
+  for(const event of ['focus','input','select','keyup','click']){
+    $(id).addEventListener(event,()=>{lastLookupField=id});
+  }
+}
+function rememberCopyLookup(){
+  const id=lastLookupField==='bankSearch'&&state.cat==='branches'?'bankSearch':'search';
+  const input=$(id);
+  returnLookup={id,cat:state.cat,start:input.selectionStart,end:input.selectionEnd};
+  lookupWasAway=false;
+}
+function restoreCopyLookup(){
+  if(!returnLookup||!lookupWasAway||document.visibilityState==='hidden'||!document.hasFocus())return;
+  if(document.querySelector('dialog[open]'))return;
+  const saved=returnLookup,input=$(saved.id);
+  returnLookup=null;lookupWasAway=false;
+  if(saved.cat!==state.cat||!input||!input.getClientRects().length)return;
+  input.focus({preventScroll:true});
+  input.setSelectionRange(saved.start,saved.end);
+}
+window.addEventListener('blur',()=>{if(returnLookup)lookupWasAway=true});
+window.addEventListener('focus',()=>requestAnimationFrame(restoreCopyLookup));
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden'){if(returnLookup)lookupWasAway=true}
+  else requestAnimationFrame(restoreCopyLookup);
+});
 function copyCells(rows,label){const plain=rows.map(r=>r.map(excelCell).join('\t')).join('\r\n');return copyText(plain,label)}
 function copyValue(v,label){return copyText(v,label)}
-function copyText(text,label){if(!text){notify('Select a value first.');return}return(async()=>{let ok=false;const previous=document.activeElement,t=el('textarea');t.value=text;t.setAttribute('readonly','');t.setAttribute('aria-label','Excel copy buffer');t.style.cssText='position:fixed;left:-10000px;top:0;width:2px;height:2px;font-size:16px';document.body.append(t);try{t.focus();t.select();t.setSelectionRange(0,t.value.length);ok=document.execCommand('copy')}catch{}finally{t.remove();try{previous?.focus({preventScroll:true})}catch{}}if(!ok){try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);ok=true}}catch{}}if(ok){notify(label+' copied — paste into a selected Excel cell.')}else{showManualCopy(text)}})()}
+function copyText(text,label){if(!text){notify('Select a value first.');return}rememberCopyLookup();return(async()=>{let ok=false;const previous=document.activeElement,t=el('textarea');t.value=text;t.setAttribute('readonly','');t.setAttribute('aria-label','Excel copy buffer');t.style.cssText='position:fixed;left:-10000px;top:0;width:2px;height:2px;font-size:16px';document.body.append(t);try{t.focus();t.select();t.setSelectionRange(0,t.value.length);ok=document.execCommand('copy')}catch{}finally{t.remove();try{previous?.focus({preventScroll:true})}catch{}}if(!ok){try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);ok=true}}catch{}}if(ok){notify(label+' copied — paste into a selected Excel cell.')}else{showManualCopy(text)}})()}
 function showManualCopy(text){$('manualText').value=text;$('manual').showModal();$('manualText').focus();$('manualText').select()}
 
 function options(select,values,placeholder,current){select.replaceChildren();const o=el('option','',placeholder);o.value='';select.append(o);for(const name of values){const v=el('option','',name);v.value=name;select.append(v)}select.value=current}
@@ -148,7 +176,7 @@ function categoryKey(){return {branches:'branch',tehsils:'tehsil',assets:'asset'
 function renderResults(){matches=getMatches();const box=$('results');box.replaceChildren();const total=state.cat==='branches'?(DATA.banks[state.bank]||[]).length:DATA[state.cat].length;const noun={branches:'branches',tehsils:'tehsils',assets:'asset classes',commodities:'commodities'}[state.cat];$('count').textContent=matches.length.toLocaleString()+' of '+total.toLocaleString()+' '+noun;$('copyAll').disabled=!matches.length;$('manualCopy').disabled=!matches.length;$('bankNotice').textContent=state.cat==='branches'?(!state.bank?'Choose a bank to see its branches. Duplicate names within each bank have been removed.':'Exact duplicate branch names removed within this bank. Copy preserves the original name.'):'Codes are for reference only. Copy, Copy matching list and Copy selected row include names only.';
  if(!matches.length){const empty=el('div','empty');empty.append(el('b','',state.cat==='branches'&&!state.bank?'Start with a bank':'No matching values'),el('span','',state.cat==='branches'&&!state.bank?'Search or select a financial institution above.':'Try another search or change the filters.'));box.append(empty);return}
  const key=categoryKey();matches.slice(0,state.limit).forEach(r=>{const row=el('div','result'+(state.picked[key]===r.name?' chosen':''));const info=el('div');info.append(el('div','value',r.name));if(r.district)info.append(el('div','meta',r.district+' · '+r.province));if(state.cat!=='branches'||r.code)info.append(el('div','refcode'+(!r.code?' missing':''),r.code?'Code: '+r.code+(r.segment?' · Segment: '+r.segment:''):'Code not supplied'));const actions=el('div','rowactions'),use=el('button','',state.picked[key]===r.name?'Selected ✓':'Select'),copy=el('button','','Copy');use.setAttribute('aria-label','Select '+r.name);copy.setAttribute('aria-label','Copy '+r.name);use.onclick=()=>{state.picked[key]=r.name;if(key==='branch')state.picked.bank=state.bank;renderPicked();renderResults()};copy.onclick=()=>copyValue(r.name,'Value');actions.append(use,copy);if(state.cat==='branches'&&r.id){const edit=el('button','','Edit');edit.onclick=()=>openEditBranch(r.id);actions.append(edit)}row.append(info,actions);box.append(row)});if(matches.length>state.limit){const b=el('button','smallbtn load','Show next '+Math.min(100,matches.length-state.limit));b.onclick=()=>{const y=box.scrollTop;state.limit+=100;renderResults();box.scrollTop=y};box.append(b)}}
-function switchCat(cat){state.cat=cat;state.query='';state.limit=100;$('search').value='';$('bankControls').classList.toggle('hidden',cat!=='branches');$('tehsilControls').classList.toggle('hidden',cat!=='tehsils');const label={branches:'Search branches',tehsils:'Search tehsil name, tehsil code or segment code',assets:'Search asset class name or code',commodities:'Search commodity name or code'}[cat];$('searchLabel').textContent=label;$('search').placeholder=cat==='branches'?'Type branch name, city or code…':'Search by name or code…';for(const b of $('tabs').children){b.classList.toggle('active',b.dataset.cat===cat);b.setAttribute('aria-pressed',String(b.dataset.cat===cat))}renderResults();$('results').scrollTop=0}
+function switchCat(cat){returnLookup=null;lastLookupField='search';state.cat=cat;state.query='';state.limit=100;$('search').value='';$('bankControls').classList.toggle('hidden',cat!=='branches');$('tehsilControls').classList.toggle('hidden',cat!=='tehsils');const label={branches:'Search branches',tehsils:'Search tehsil name, tehsil code or segment code',assets:'Search asset class name or code',commodities:'Search commodity name or code'}[cat];$('searchLabel').textContent=label;$('search').placeholder=cat==='branches'?'Type branch name, city or code…':'Search by name or code…';for(const b of $('tabs').children){b.classList.toggle('active',b.dataset.cat===cat);b.setAttribute('aria-pressed',String(b.dataset.cat===cat))}renderResults();$('results').scrollTop=0}
 function rowCells(){const rows=[FIELDS.map(([key])=>state.picked[key])];if($('headers').checked)rows.unshift(FIELDS.map(([,label])=>label));return rows}
 function rowText(){return rowCells().map(r=>r.map(excelCell).join('\t')).join('\r\n')}
 $('tabs').replaceChildren();
