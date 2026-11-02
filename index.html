@@ -38,7 +38,7 @@
       <div class="managegrid"><div><label for="importSheet">Worksheet</label><select id="importSheet"></select></div><div><label for="headerRow">Header row number</label><input id="headerRow" type="number" min="1" max="100" value="1"></div></div>
       <div class="managegrid three"><div><label for="mapBank">Bank column</label><select id="mapBank"></select></div><div><label for="mapName">Branch name column</label><select id="mapName"></select></div><div><label for="mapCode">Branch code column</label><select id="mapCode"></select></div><div><label for="mapOldName">Old branch name (for renames)</label><select id="mapOldName"></select></div><div><label for="mapOldCode">Old branch code (for code changes)</label><select id="mapOldCode"></select></div></div>
       <p class="sub">Codes keep leading zeros as shown in Excel. A name containing a code stays intact; codes are not guessed from names. Use an old name/code column when both the branch name and code change.</p>
-      <button id="previewImport" class="primary">Preview changes</button>
+      <label for="bankImportMode">Import action</label><select id="bankImportMode"><option value="merge">Add / update branches; keep existing branches</option><option value="replace">Replace ALL branches of the selected bank</option></select><p class="sub">Replace: choose the bank above. If a bank column is mapped, only matching rows are used. All old branches of that bank will be removed after confirmation.</p><button id="previewImport" class="primary">Preview changes</button><section id="bankReplaceReview" class="hidden"><p id="bankReplaceSummary" role="status"></p><div id="bankReplaceRows" class="manageBranches"></div><button id="applyBankReplace" class="primary">Replace selected bank branches</button></section>
     </div>
   </section>
   <section id="importReview" class="hidden"><h4>Review changes</h4><p id="importSummary" class="sub"></p><p class="sub">Same bank + code matches are updates. Without a reliable match, choose <b>Add as new</b> or select the old branch. Unchecked and unresolved rows are skipped.</p>
@@ -248,6 +248,7 @@ renderBanks();renderPicked();switchCat('branches');
 <script>const publishedBankSnapshot={records:BankEngine.initial(DATA),banks:Object.keys(DATA.banks)};
 const bankStorageKey='pba-bank-manager-v1-'+(DATA.bankDataVersion||'base');
 let bankRecords=BankEngine.initial(DATA), managedBanks=Object.keys(DATA.banks), savedBankRaw=null, bankLoadError='', bankUndo=null;
+let bankReplacePlan=null;
 let importBook=null, importRows=[], importPlan=[], reviewOffset=0, editing=null;
 function validateBankSnapshot(s){
   if(!s||s.schema!==1||!Array.isArray(s.records)||!Array.isArray(s.banks))throw Error('Saved bank data is not in a supported format.');
@@ -351,7 +352,7 @@ $('loadPublished').onclick=async ()=>{try{await persistBanks(structuredClone(pub
 $('closeManager').onclick=()=>$('manager').close();
 $('manageBank').oninput=()=>{renderManageBranches();clearImportPreview();};$('editBranchSearch').oninput=renderManageBranches;
 $('undoBanks').onclick=async ()=>{try{if(bankUndo)await persistBanks(bankUndo,'Last bank/branch change undone.',true);}catch(e){manageMessage(e.message,true);}};
-function clearImportPreview(){importPlan=[];reviewOffset=0;$('importReview').classList.add('hidden');$('reviewRows').replaceChildren();}
+function clearImportPreview(){bankReplacePlan=null;$('bankReplaceReview').classList.add('hidden');$('bankReplaceRows').replaceChildren();importPlan=[];reviewOffset=0;$('importReview').classList.add('hidden');$('reviewRows').replaceChildren();}
 const columnMaps=['mapBank','mapName','mapCode','mapOldName','mapOldCode'];
 const headerKey=v=>BankEngine.key(v).replace(/[^A-Z0-9]/g,'');
 const aliases={mapBank:['FI','BANK','BANKNAME','FINANCIALINSTITUTION','INSTITUTION'],mapName:['BRANCH','BRANCHNAME','NEWBRANCH','NEWBRANCHNAME'],mapCode:['BRANCHCODE','CODE','NEWBRANCHCODE'],mapOldName:['OLDBRANCH','OLDBRANCHNAME','PREVIOUSBRANCHNAME'],mapOldCode:['OLDBRANCHCODE','PREVIOUSBRANCHCODE']};
@@ -377,8 +378,9 @@ $('bankUpload').onchange=async()=>{
 };
 $('importSheet').onchange=()=>{if($('importSheet').value)readImportSheet(true);else{clearImportPreview();}};
 $('headerRow').onchange=()=>readImportSheet();for(const id of columnMaps)$(id).onchange=clearImportPreview;
+$('bankImportMode').onchange=clearImportPreview;
 $('previewImport').onclick=()=>{
-  try{
+  clearImportPreview();try{
     if(!importBook||!$('importSheet').value)throw Error('Choose a worksheet.');
     if($('mapName').value==='')throw Error('Choose the branch name column.');
     if($('mapBank').value===''&&!BankEngine.clean($('manageBank').value))throw Error('Choose a bank column or enter a default bank above.');
@@ -388,10 +390,35 @@ $('previewImport').onclick=()=>{
     const value=(row,id)=>$(id).value===''?'':row[Number($(id).value)]||'';
     const incoming=importRows.slice(start).map((row,i)=>({row:start+i+1,bank:$('mapBank').value===''?actualBank($('manageBank').value):value(row,'mapBank'),name:value(row,'mapName'),code:value(row,'mapCode'),oldName:value(row,'mapOldName'),oldCode:value(row,'mapOldCode'),empty:row.every(v=>!BankEngine.clean(v))})).filter(r=>!r.empty);
     if(!incoming.length)throw Error('No data rows found below the header.');
+    if($('bankImportMode').value==='replace'){
+      bankReplacePlan=prepareBankReplacement(bankRecords,managedBanks,actualBank($('manageBank').value),incoming);
+      const p=bankReplacePlan;$('bankReplaceSummary').textContent=p.bank+': remove '+p.removed+' old branches and save '+p.added+' file branches. '+p.duplicates+' repeated rows skipped; '+p.ignored+' rows for other banks ignored. Nothing has been changed yet.';
+      const box=$('bankReplaceRows');for(const r of p.next.records.filter(r=>r.bank===p.bank).slice(0,100))box.append(el('div','result',r.name+(r.code?' — '+r.code:'')));
+      if(p.added>100)box.append(el('p','sub','Showing the first 100 of '+p.added+' branches.'));
+      $('bankReplaceReview').classList.remove('hidden');manageMessage('Replacement preview ready. Check the bank and branch counts before applying.');return;
+    }
     importPlan=BankEngine.plan(bankRecords,managedBanks,incoming).map(p=>({...p,selected:['add','update'].includes(p.status),originalStatus:p.status}));reviewOffset=0;
     $('importReview').classList.remove('hidden');renderImportReview();manageMessage('Preview ready. Nothing has been changed yet.');
   }catch(e){manageMessage(e.message,true);}
 };
+function prepareBankReplacement(records,banks,bank,incoming){
+  bank=banks.find(b=>BankEngine.key(b)===BankEngine.key(bank))||BankEngine.clean(bank);
+  if(!bank||/[\t\r\n]/.test(bank))throw Error('Choose the bank to replace in Bank to manage.');
+  const matching=incoming.filter(r=>BankEngine.key(r.bank)===BankEngine.key(bank));
+  if(!matching.length)throw Error('No file rows match the selected bank. Existing branches were kept.');
+  const seen=new Set(),changes=[];let duplicates=0;
+  for(const r of matching){const name=BankEngine.clean(r.name),code=BankEngine.clean(r.code);if(!name)throw Error('Branch name is missing at source row '+r.row+'. Fix the file before replacing.');const key=JSON.stringify([BankEngine.key(name),BankEngine.key(code)]);if(seen.has(key)){duplicates++;continue;}seen.add(key);changes.push({bank,name,code,status:'add'});}
+  const next=BankEngine.apply(records.filter(r=>BankEngine.key(r.bank)!==BankEngine.key(bank)),banks,changes);
+  const usedIds=new Set(records.map(r=>r.id));let serial=0;for(const r of next.records){if(r.bank===bank){while(usedIds.has('replacement-'+serial))serial++;r.id='replacement-'+serial++;usedIds.add(r.id);}}
+  return {bank,next,removed:records.filter(r=>BankEngine.key(r.bank)===BankEngine.key(bank)).length,added:changes.length,duplicates,ignored:incoming.length-matching.length,base:JSON.stringify({records,banks})};
+}
+$('applyBankReplace').onclick=async ()=>{try{
+  const p=bankReplacePlan;if(!p)throw Error('Preview the replacement first.');
+  if(p.base!==JSON.stringify({records:bankRecords,banks:managedBanks}))throw Error('Bank data changed. Preview the replacement again.');
+  if(!confirm('Replace ALL '+p.removed+' existing branches of '+p.bank+' with '+p.added+' branches from this file? Other banks will be kept.'))return;
+  await persistBanks(p.next,p.bank+': branch list replaced. Undo last change is available until reload.');
+  $('manageBank').value=p.bank;renderManageBranches();
+}catch(e){manageMessage(e.message,true);}};
 function summaryImport(){
   const counts={};for(const p of importPlan)counts[p.status]=(counts[p.status]||0)+1;
   $('importSummary').textContent=importPlan.length+' rows checked · '+(counts.add||0)+' new · '+(counts.update||0)+' updates · '+(counts.unchanged||0)+' unchanged · '+(counts.duplicate||0)+' repeated · '+(counts.review||0)+' need a decision · '+(counts.conflict||0)+' conflicts';
