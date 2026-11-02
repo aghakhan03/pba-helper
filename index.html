@@ -255,7 +255,22 @@ function validateBankSnapshot(s){
   for(const r of s.records){if(!r||!['id','bank','name','code'].every(k=>typeof r[k]==='string')||!r.id||!r.bank||!r.name||ids.has(r.id))throw Error('Saved bank data failed validation.');ids.add(r.id);}
   if(s.banks.some(b=>typeof b!=='string'||!b)||s.records.some(r=>!s.banks.includes(r.bank)))throw Error('Saved bank list failed validation.');
 }
-try{savedBankRaw=localStorage.getItem(bankStorageKey);if(savedBankRaw){const s=JSON.parse(savedBankRaw);validateBankSnapshot(s);bankRecords=s.records;managedBanks=s.banks;}}catch(e){bankLoadError='Saved data could not be loaded. Changes are disabled to protect it. '+e.message;}
+function encodeBankChanges(next){
+  const base=new Map(publishedBankSnapshot.records.map(r=>[r.id,r]));
+  const ids=new Set(next.records.map(r=>r.id));
+  return {schema:2,banks:next.banks,removed:publishedBankSnapshot.records.filter(r=>!ids.has(r.id)).map(r=>r.id),changed:next.records.filter(r=>!base.has(r.id)||JSON.stringify(base.get(r.id))!==JSON.stringify(r))};
+}
+function decodeBankChanges(saved){
+  if(saved.schema!==2){validateBankSnapshot(saved);return saved;}
+  if(!Array.isArray(saved.removed)||saved.removed.some(id=>typeof id!=='string')||!Array.isArray(saved.changed))throw Error('Saved bank changes failed validation.');
+  validateBankSnapshot({schema:1,banks:saved.banks,records:saved.changed});
+  const removed=new Set(saved.removed),changes=new Map(saved.changed.map(r=>[r.id,r]));
+  const records=[];
+  for(const base of publishedBankSnapshot.records){if(removed.has(base.id)){if(changes.has(base.id))throw Error('Conflicting saved bank changes.');continue;}records.push(changes.get(base.id)||base);changes.delete(base.id);}
+  records.push(...changes.values());
+  const snapshot={schema:1,banks:saved.banks,records};validateBankSnapshot(snapshot);return snapshot;
+}
+try{savedBankRaw=localStorage.getItem(bankStorageKey);if(savedBankRaw){const s=decodeBankChanges(JSON.parse(savedBankRaw));bankRecords=s.records;managedBanks=s.banks;}}catch(e){bankLoadError='Saved data could not be loaded. Changes are disabled to protect it. '+e.message;}
 function syncBankData(){
   const banks=Object.create(null);for(const b of managedBanks)banks[b]=[];
   for(const r of bankRecords){if(!banks[r.bank])banks[r.bank]=[];banks[r.bank].push(r.name);}
@@ -272,7 +287,7 @@ function persistBanks(next,message,undoing=false){
   if(bankLoadError)throw Error(bankLoadError);
   if(localStorage.getItem(bankStorageKey)!==savedBankRaw)throw Error('Bank data changed in another tab. Reload this page before editing.');
   validateBankSnapshot({schema:1,...next});
-  const raw=JSON.stringify({schema:1,...next,savedAt:new Date().toISOString()});
+  const raw=JSON.stringify(encodeBankChanges(next));
   try{localStorage.setItem(bankStorageKey,raw);}catch{throw Error('Browser storage is full or unavailable. No changes were applied. Download the current app before clearing browser storage.');}
   const oldRecords=bankRecords;
   if(!undoing)bankUndo={records:structuredClone(bankRecords),banks:[...managedBanks]};else bankUndo=null;
