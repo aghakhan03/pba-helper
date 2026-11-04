@@ -235593,27 +235593,46 @@ window.PbaWorkspaceBridge = {
     }
     if (path === 'import') {
       if (body.size > 8 * 1024 * 1024) throw Error('Maximum file size is 8 MB.');
-      const book = XLSX.read(await body.arrayBuffer(), {
-          type: 'array',
-          cellDates: false
-        }),
-        sheet = book.Sheets[book.SheetNames[0]];
-      const values = XLSX.utils.sheet_to_json(sheet, {
-        header: 1,
-        raw: false,
-        defval: '',
-        blankrows: false
-      });
-      if (values.length > 5001) throw Error('Maximum 5,000 rows.');
+      const book = XLSX.read(await body.arrayBuffer(), {type: 'array', cellDates: false});
       const fields = ['serial_no', 'valuing_branch', 'valuation_date', 'client', 'amount', 'financial_institution', 'fi_branch', 'tehsil', 'asset_class', 'commodity', 'surveying_member', 'data_collecting_member', 'signing_member'];
       const headers = ['S.No.', 'Valuing Branch', 'Valuation Date', 'Client', 'Amount', 'Financial Institution', 'FI Branch', 'Tehsil', 'Asset Class', 'Commodity', 'Surveying Member', 'Data Collecting Member', 'Signing Member'];
-      const key = x => String(x).toLowerCase().replace(/[^a-z0-9]/g, '');
-      const heading = (values.shift() || []).map(key);
-      const indexes = fields.map((f, i) => heading.findIndex(h => h === key(headers[i]) || h === key(f) || (i === 4 && h === 'amountfullvalue') || (i === 7 && h === 'tehsils')));
-      if (indexes.slice(0, 13).some(i => i < 0)) throw Error('Use Download Template headings, or prepare the 13-column file with the helper mapping tool.');
-      return {
-        rows: values.map(row => Object.fromEntries(fields.map((f, i) => [f, indexes[i] < 0 ? '' : String(row[indexes[i]] ?? '')])))
-      };
+      // Match named columns, never positions, so reordered columns remain safe.
+      const key = value => String(value ?? '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const aliases = fields.map((field, i) => new Set([key(field), key(headers[i])]));
+      ['srno','serialnumber','serialno'].forEach(x => aliases[0].add(x));
+      aliases[4].add('amountfullvalue');
+      aliases[7].add('tehsils');
+      const candidates = [];
+      let best = {score: 0, missing: headers, sheet: ''};
+      for (const name of book.SheetNames) {
+        const values = XLSX.utils.sheet_to_json(book.Sheets[name], {header: 1, raw: false, defval: '', blankrows: false});
+        // Allow a title or blank lines above the table's header.
+        for (let h = 0; h < Math.min(values.length, 25); h++) {
+          const heading = values[h].map(key);
+          const indexes = aliases.map(names => heading.findIndex(value => names.has(value)));
+          const score = indexes.filter(index => index >= 0).length;
+          if (score > best.score) best = {score, sheet: name, missing: headers.filter((_, i) => indexes[i] < 0)};
+          if (score !== fields.length) continue;
+          const duplicates = aliases.map((names, i) => heading.filter(value => names.has(value)).length > 1 ? headers[i] : null).filter(Boolean);
+          const data = values.slice(h + 1).filter(row => indexes.some(index => String(row[index] ?? '').trim()));
+          candidates.push({name, indexes, data, duplicates});
+          break;
+        }
+      }
+      if (!candidates.length) throw Error('Excel headings not recognized' + (best.sheet ? ' in ' + best.sheet : '') + '. Missing: ' + best.missing.join(', '));
+      const populated = candidates.filter(candidate => candidate.data.length);
+      let chosen = populated.length ? populated[0] : candidates[0];
+      if (populated.length > 1) {
+        const answer = prompt('Choose the sheet to import (enter its number):\n' + populated.map((candidate, i) => (i + 1) + '. ' + candidate.name + ' — ' + candidate.data.length + ' rows').join('\n'), '1');
+        if (answer === null) throw Error('Import cancelled. No rows were added.');
+        const index = Number(answer) - 1;
+        if (!Number.isInteger(index) || !populated[index]) throw Error('Invalid sheet selection. No rows were added.');
+        chosen = populated[index];
+      }
+      if (chosen.duplicates.length) throw Error('Duplicate headings in ' + chosen.name + ': ' + chosen.duplicates.join(', '));
+      if (!chosen.data.length) throw Error('The recognized template has no data rows.');
+      if (chosen.data.length > 5000) throw Error('Maximum 5,000 rows.');
+      return {rows: chosen.data.map(row => Object.fromEntries(fields.map((field, i) => [field, String(row[chosen.indexes[i]] ?? '')])))};
     }
     throw Error('Unsupported workspace action.');
   },
