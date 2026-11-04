@@ -235593,7 +235593,10 @@ window.PbaWorkspaceBridge = {
     }
     if (path === 'import') {
       if (body.size > 8 * 1024 * 1024) throw Error('Maximum file size is 8 MB.');
-      const book = XLSX.read(await body.arrayBuffer(), {type: 'array', cellDates: false});
+      // The File comes from the workspace iframe. Normalize its foreign-realm
+      // ArrayBuffer here: SheetJS otherwise can misread ZIP bytes as CSV text.
+      const bytes = new Uint8Array(await body.arrayBuffer());
+      const book = XLSX.read(bytes, {type: 'array', cellDates: false});
       const fields = ['serial_no', 'valuing_branch', 'valuation_date', 'client', 'amount', 'financial_institution', 'fi_branch', 'tehsil', 'asset_class', 'commodity', 'surveying_member', 'data_collecting_member', 'signing_member'];
       const headers = ['S.No.', 'Valuing Branch', 'Valuation Date', 'Client', 'Amount', 'Financial Institution', 'FI Branch', 'Tehsil', 'Asset Class', 'Commodity', 'Surveying Member', 'Data Collecting Member', 'Signing Member'];
       // Match named columns, never positions, so reordered columns remain safe.
